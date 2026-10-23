@@ -1,3 +1,4 @@
+// Person 1: Main Application, Navigation & Property Management Integration
 import { useEffect, useState } from 'react'
 import BookingManagement from './BookingManagement'
 import AppointmentManagement from './AppointmentManagement'
@@ -2809,3 +2810,4 @@ function pageTitle(page) {
 }
 
 export default App
+
