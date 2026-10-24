@@ -1999,7 +1999,7 @@ function App() {
                               <img
                                 src={cover}
                                 alt={property.property_name}
-                                className="h-44 w-full object-cover"
+                                className="h-44 w-full object-cover transition-transform duration-300 hover:scale-105"
                               />
                             ) : (
                               <div className="flex h-28 items-center justify-center bg-blue-50 text-blue-600">
@@ -2810,4 +2810,5 @@ function pageTitle(page) {
 }
 
 export default App
+
 
