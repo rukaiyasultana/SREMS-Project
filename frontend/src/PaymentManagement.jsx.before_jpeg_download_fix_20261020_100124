@@ -1,0 +1,707 @@
+import { useCallback, useEffect, useState } from 'react'
+import {
+  CreditCard,
+  RefreshCw,
+  LoaderCircle,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Plus,
+  Trash2,
+} from 'lucide-react'
+
+function money(value) {
+  return `৳ ${Number(value || 0).toLocaleString('en-BD', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
+
+function dateLabel(value) {
+  if (!value) return '—'
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00`)
+  return Number.isNaN(date.getTime())
+    ? String(value)
+    : date.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      })
+}
+
+function badge(status) {
+  const styles = {
+    pending: 'bg-amber-100 text-amber-800',
+    approved: 'bg-emerald-100 text-emerald-800',
+    paid: 'bg-emerald-100 text-emerald-800',
+    partially_paid: 'bg-blue-100 text-blue-800',
+    rejected: 'bg-rose-100 text-rose-800',
+    overdue: 'bg-rose-100 text-rose-800',
+  }
+
+  return (
+    <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${styles[status] || 'bg-slate-100 text-slate-700'}`}>
+      {String(status || 'unknown').replaceAll('_', ' ')}
+    </span>
+  )
+}
+
+const inputClass =
+  'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10'
+
+export default function PaymentManagement({ apiRequest, isManager, userRole }) {
+  const [bookings, setBookings] = useState([])
+  const [payments, setPayments] = useState([])
+  const [installments, setInstallments] = useState([])
+  const [selectedBooking, setSelectedBooking] = useState('')
+  const [selectedInstallment, setSelectedInstallment] = useState('')
+  const [amount, setAmount] = useState('')
+  const [method, setMethod] = useState('bank_transfer')
+  const [bankName, setBankName] = useState('')
+  const [bankSlipNumber, setBankSlipNumber] = useState('')
+  const [receiptFile, setReceiptFile] = useState(null)
+  const [reference, setReference] = useState('')
+  const [customerNote, setCustomerNote] = useState('')
+  const [planRows, setPlanRows] = useState([{ amount_due: '', due_date: '' }])
+  const [adminNote, setAdminNote] = useState({})
+  const [busy, setBusy] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+
+  const loadData = useCallback(async () => {
+    setLoading(true)
+    setError('')
+
+    try {
+      const [bookingResult, paymentResult, installmentResult] =
+        await Promise.all([
+          apiRequest('/bookings'),
+          apiRequest('/payments'),
+          apiRequest('/installments'),
+        ])
+
+      const bookingRows = Array.isArray(bookingResult?.data)
+        ? bookingResult.data
+        : Array.isArray(bookingResult?.bookings)
+          ? bookingResult.bookings
+          : []
+
+      const paymentRows = Array.isArray(paymentResult?.payments?.data)
+        ? paymentResult.payments.data
+        : Array.isArray(paymentResult?.payments)
+          ? paymentResult.payments
+          : []
+
+      const installmentRows = Array.isArray(installmentResult?.installments)
+        ? installmentResult.installments
+        : []
+
+      setBookings(bookingRows)
+      setPayments(paymentRows)
+      setInstallments(installmentRows)
+
+      if (!selectedBooking) {
+        const firstApproved = bookingRows.find((booking) => booking.status === 'approved')
+        if (firstApproved) setSelectedBooking(String(firstApproved.id))
+      }
+    } catch (err) {
+      setError(err.message || 'Unable to load payment information.')
+    } finally {
+      setLoading(false)
+    }
+  }, [apiRequest, selectedBooking])
+
+  useEffect(() => {
+    loadData()
+  }, [loadData])
+
+  const approvedBookings = bookings.filter(
+    (booking) => booking.status === 'approved'
+  )
+
+  const bookingInstallments = installments.filter(
+    (item) => String(item.booking_id) === String(selectedBooking)
+  )
+
+  const selectedPlan = bookings.find(
+    (booking) => String(booking.id) === String(selectedBooking)
+  )
+
+  async function createPlan(event) {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+
+    if (!selectedBooking) {
+      setError('Select an approved booking first.')
+      return
+    }
+
+    const validRows = planRows.map((row) => ({
+      amount_due: Number(row.amount_due),
+      due_date: row.due_date || null,
+    }))
+
+    if (validRows.some((row) => !Number.isFinite(row.amount_due) || row.amount_due <= 0)) {
+      setError('Enter a valid positive amount for every installment.')
+      return
+    }
+
+    setBusy('plan')
+
+    try {
+      const result = await apiRequest(`/bookings/${selectedBooking}/installments`, {
+        method: 'POST',
+        body: JSON.stringify({ installments: validRows }),
+      })
+
+      setNotice(result?.message || 'Installment plan created.')
+      setPlanRows([{ amount_due: '', due_date: '' }])
+      await loadData()
+    } catch (err) {
+      setError(err.message || 'Unable to create the installment plan.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function submitPayment(event) {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+
+    if (!selectedBooking || !selectedInstallment) {
+      setError('Select an approved booking and an installment.')
+      return
+    }
+
+    if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+      setError('Enter a valid payment amount.')
+      return
+    }
+
+    setBusy('submit')
+
+    try {
+      const formData = new FormData()
+      formData.append('booking_id', String(Number(selectedBooking)))
+      formData.append('installment_id', String(Number(selectedInstallment)))
+      formData.append('amount', String(Number(amount)))
+      formData.append('payment_method', method)
+
+      if (method === 'bank_transfer') {
+        formData.append('bank_name', bankName.trim())
+        formData.append('bank_slip_number', bankSlipNumber.trim())
+      }
+
+      if (method === 'mobile_banking') {
+        formData.append('transaction_reference', reference.trim())
+      }
+
+      if (customerNote.trim()) {
+        formData.append('customer_note', customerNote.trim())
+      }
+
+      if (receiptFile) formData.append('receipt', receiptFile)
+
+      const result = await apiRequest('/payments', {
+        method: 'POST',
+        body: formData,
+      })
+
+      setNotice(result?.message || 'Payment submitted for verification.')
+      setAmount('')
+      setReference('')
+      setBankName('')
+      setBankSlipNumber('')
+      setReceiptFile(null)
+      setCustomerNote('')
+      await loadData()
+    } catch (err) {
+      setError(err.message || 'Unable to submit payment.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function downloadReceipt(payment) {
+    setError('')
+    setNotice('')
+    setBusy(`receipt-${payment.id}`)
+
+    try {
+      const blob = await apiRequest(`/payments/${payment.id}/receipt`, {
+        method: 'GET',
+        responseType: 'blob',
+      })
+
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      const receiptExtension = String(payment.receipt_path || '').split('.').pop()?.toLowerCase()
+const allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'pdf']
+const extension = allowedExtensions.includes(receiptExtension) ? `.${receiptExtension}` : ''
+link.download = `payment-${payment.id}-receipt${extension}`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+    } catch (err) {
+      setError(err.message || 'Unable to download receipt.')
+    } finally {
+      setBusy('')
+    }
+  }
+  async function reviewPayment(payment, status) {
+    setError('')
+    setNotice('')
+
+    const action = status === 'approved' ? 'approve' : 'reject'
+    if (!window.confirm(`Are you sure you want to ${action} payment #${payment.id}?`)) {
+      return
+    }
+
+    setBusy(`review-${payment.id}`)
+
+    try {
+      const result = await apiRequest(`/payments/${payment.id}/review`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status,
+          admin_note: adminNote[payment.id] || null,
+        }),
+      })
+
+      setNotice(result?.message || `Payment ${status}.`)
+      await loadData()
+    } catch (err) {
+      setError(err.message || `Unable to ${action} this payment.`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const pendingCount = payments.filter((payment) => payment.status === 'pending').length
+  const approvedTotal = payments
+    .filter((payment) => payment.status === 'approved')
+    .reduce((total, payment) => total + Number(payment.amount || 0), 0)
+
+  return (
+    <section className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 text-blue-700">
+            <CreditCard size={22} />
+            <span className="text-sm font-semibold uppercase tracking-wide">Finance</span>
+          </div>
+          <h1 className="mt-2 text-2xl font-bold text-slate-900">Payment Management</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Manage installment schedules, payment submissions and verification.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={loadData}
+          disabled={loading}
+          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+        >
+          <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+          {error}
+        </div>
+      )}
+
+      {notice && (
+        <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+          {notice}
+        </div>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm text-slate-500">Payment records</p>
+          <p className="mt-2 text-2xl font-bold text-slate-900">{payments.length}</p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm text-slate-500">Pending verification</p>
+          <p className="mt-2 text-2xl font-bold text-amber-700">{pendingCount}</p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm text-slate-500">Approved payments</p>
+          <p className="mt-2 text-xl font-bold text-emerald-700">{money(approvedTotal)}</p>
+        </div>
+      </div>
+
+      {isManager ? (
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+          <h2 className="text-lg font-bold text-slate-900">Create installment plan</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Choose an approved booking. All installment amounts must add up exactly to the property price.
+          </p>
+
+          <form onSubmit={createPlan} className="mt-5 space-y-4">
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">Approved booking</span>
+              <select
+                className={inputClass}
+                value={selectedBooking}
+                onChange={(event) => setSelectedBooking(event.target.value)}
+                required
+              >
+                <option value="">Select a booking</option>
+                {approvedBookings.map((booking) => (
+                  <option key={booking.id} value={booking.id}>
+                    #{booking.id} — {booking.property?.property_name || 'Property'} — {money(booking.property?.price)}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedPlan && (
+              <p className="rounded-xl bg-blue-50 p-3 text-sm text-blue-800">
+                Property price: <strong>{money(selectedPlan.property?.price)}</strong>
+              </p>
+            )}
+
+            {bookingInstallments.length > 0 && (
+              <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
+                An installment plan already exists for this booking. A second plan cannot be created.
+              </p>
+            )}
+
+            {planRows.map((row, index) => (
+              <div key={index} className="grid gap-3 rounded-xl border border-slate-200 p-3 sm:grid-cols-[1fr_1fr_auto]">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-medium text-slate-600">Installment {index + 1} amount (৳)</span>
+                  <input
+                    className={inputClass}
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={row.amount_due}
+                    onChange={(event) => setPlanRows((rows) => rows.map((item, i) =>
+                      i === index ? { ...item, amount_due: event.target.value } : item
+                    ))}
+                    required
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-medium text-slate-600">Due date (optional)</span>
+                  <input
+                    className={inputClass}
+                    type="date"
+                    value={row.due_date}
+                    onChange={(event) => setPlanRows((rows) => rows.map((item, i) =>
+                      i === index ? { ...item, due_date: event.target.value } : item
+                    ))}
+                  />
+                </label>
+                <button
+                  type="button"
+                  title="Remove installment"
+                  disabled={planRows.length === 1 || bookingInstallments.length > 0}
+                  onClick={() => setPlanRows((rows) => rows.filter((_, i) => i !== index))}
+                  className="self-end rounded-xl border border-slate-200 p-2.5 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                >
+                  <Trash2 size={17} />
+                </button>
+              </div>
+            ))}
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                disabled={bookingInstallments.length > 0}
+                onClick={() => setPlanRows((rows) => [...rows, { amount_due: '', due_date: '' }])}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+              >
+                <Plus size={16} /> Add installment
+              </button>
+              <button
+                type="submit"
+                disabled={busy === 'plan' || !selectedBooking || bookingInstallments.length > 0}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
+              >
+                {busy === 'plan' && <LoaderCircle size={16} className="animate-spin" />}
+                Create plan
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : (
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+          <h2 className="text-lg font-bold text-slate-900">Submit a payment</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Only approved bookings with an installment plan can receive payment submissions.
+          </p>
+
+          <form onSubmit={submitPayment} className="mt-5 grid gap-4 md:grid-cols-2">
+            <label className="block md:col-span-2">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">Approved booking</span>
+              <select
+                className={inputClass}
+                value={selectedBooking}
+                onChange={(event) => {
+                  setSelectedBooking(event.target.value)
+                  setSelectedInstallment('')
+                }}
+                required
+              >
+                <option value="">Select a booking</option>
+                {approvedBookings.map((booking) => (
+                  <option key={booking.id} value={booking.id}>
+                    #{booking.id} — {booking.property?.property_name || 'Property'} — {money(booking.property?.price)}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block md:col-span-2">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">Installment</span>
+              <select
+                className={inputClass}
+                value={selectedInstallment}
+                onChange={(event) => setSelectedInstallment(event.target.value)}
+                required
+              >
+                <option value="">Select an installment</option>
+                {bookingInstallments.filter((item) => item.status !== 'paid').map((item) => (
+                  <option key={item.id} value={item.id}>
+                    Installment {item.installment_number} — Due {money(Number(item.amount_due) - Number(item.amount_paid))} — {dateLabel(item.due_date)}
+                  </option>
+                ))}
+              </select>
+              {bookingInstallments.length === 0 && selectedBooking && (
+                <span className="mt-1 block text-xs text-amber-700">
+                  No installment plan exists for this booking yet. Contact Admin/Authority.
+                </span>
+              )}
+            </label>
+
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">Amount (৳)</span>
+              <input className={inputClass} type="number" min="0.01" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} required />
+            </label>
+
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">Payment method</span>
+              <select className={inputClass} value={method} onChange={(event) => setMethod(event.target.value)}>
+                <option value="bank_transfer">Bank transfer</option>
+                <option value="mobile_banking">Mobile banking</option>
+                <option value="cash">Cash</option>
+                <option value="card">Card (record only)</option>
+                <option value="online">Online (record only)</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+
+            {method === 'bank_transfer' && (
+              <>
+                <label className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Bank name</span>
+                  <input className={inputClass} value={bankName} onChange={(event) => setBankName(event.target.value)} maxLength={120} required placeholder="Enter bank name" />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Bank slip number</span>
+                  <input className={inputClass} value={bankSlipNumber} onChange={(event) => setBankSlipNumber(event.target.value)} maxLength={120} required placeholder="Enter bank slip number" />
+                </label>
+              </>
+            )}
+
+            {method === 'mobile_banking' && (
+              <label className="block md:col-span-2">
+                <span className="mb-1.5 block text-sm font-medium text-slate-700">Transaction ID / Reference</span>
+                <input className={inputClass} value={reference} onChange={(event) => setReference(event.target.value)} maxLength={120} required placeholder="Enter mobile banking transaction ID" />
+              </label>
+            )}
+
+            <label className="block md:col-span-2">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">Receipt upload (optional, max 5 MB)</span>
+              <input
+                className={inputClass}
+                type="file"
+                accept=".jpg,.jpeg,.png,.webp,.pdf"
+                onChange={(event) => setReceiptFile(event.target.files?.[0] || null)}
+              />
+              <span className="mt-1 block text-xs text-slate-500">Accepted formats: JPG, PNG, WEBP and PDF.</span>
+            </label>
+<label className="block md:col-span-2">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">Note to Admin (optional)</span>
+              <textarea className={inputClass} rows={3} value={customerNote} onChange={(event) => setCustomerNote(event.target.value)} maxLength={2000} />
+            </label>
+
+            <div className="md:col-span-2">
+              <p className="mb-3 text-xs leading-5 text-slate-500">
+                Submissions remain pending until Admin/Authority verifies them. This form does not process real online transactions.
+              </p>
+              <button
+                type="submit"
+                disabled={busy === 'submit' || bookingInstallments.length === 0}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
+              >
+                {busy === 'submit' && <LoaderCircle size={16} className="animate-spin" />}
+                Submit payment for verification
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <h2 className="text-lg font-bold text-slate-900">Installment schedule</h2>
+
+        {loading ? (
+          <div className="flex items-center gap-2 py-8 text-sm text-slate-500">
+            <LoaderCircle size={18} className="animate-spin" /> Loading installments…
+          </div>
+        ) : installments.length === 0 ? (
+          <p className="py-8 text-sm text-slate-500">No installment plans have been created yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[700px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
+                  <th className="px-3 py-3">Booking / Property</th>
+                  <th className="px-3 py-3">Installment</th>
+                  <th className="px-3 py-3">Due date</th>
+                  <th className="px-3 py-3">Due amount</th>
+                  <th className="px-3 py-3">Paid</th>
+                  <th className="px-3 py-3">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {installments.map((item) => (
+                  <tr key={item.id} className="border-b border-slate-100 last:border-0">
+                    <td className="px-3 py-4">
+                      <p className="font-semibold text-slate-800">#{item.booking_id}</p>
+                      <p className="text-xs text-slate-500">{item.booking?.property?.property_name || 'Property'}</p>
+                    </td>
+                    <td className="px-3 py-4">{item.installment_number}</td>
+                    <td className="px-3 py-4">{dateLabel(item.due_date)}</td>
+                    <td className="px-3 py-4">{money(item.amount_due)}</td>
+                    <td className="px-3 py-4">{money(item.amount_paid)}</td>
+                    <td className="px-3 py-4">{badge(item.status)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <h2 className="text-lg font-bold text-slate-900">
+          {isManager ? 'Payment verification queue' : 'My payments'}
+        </h2>
+
+        {loading ? (
+          <div className="flex items-center gap-2 py-8 text-sm text-slate-500">
+            <LoaderCircle size={18} className="animate-spin" /> Loading payments…
+          </div>
+        ) : payments.length === 0 ? (
+          <p className="py-8 text-sm text-slate-500">No payment records found.</p>
+        ) : (
+          <div className="mt-4 space-y-4">
+            {payments.map((payment) => (
+              <article key={payment.id} className="rounded-xl border border-slate-200 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-bold text-slate-900">Payment #{payment.id} — {money(payment.amount)}</p>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {payment.booking?.property?.property_name || 'Property'} · Booking #{payment.booking_id}
+                    </p>
+                    {isManager && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        Customer: {payment.customer?.name || '—'} ({payment.customer?.email || '—'})
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-slate-500">
+                      Method: {String(payment.payment_method || '').replaceAll('_', ' ')}
+                      {payment.transaction_reference ? ` · Reference: ${payment.transaction_reference}` : ''}
+                    </p>
+                    {payment.bank_name && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        Bank: {payment.bank_name} · Slip: {payment.bank_slip_number || '—'}
+                      </p>
+                    )}
+                    {payment.receipt_path && (
+                      <button
+                        type="button"
+                        disabled={busy === `receipt-${payment.id}`}
+                        onClick={() => downloadReceipt(payment)}
+                        className="mt-2 inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                      >
+                        {busy === `receipt-${payment.id}` ? 'Downloading...' : 'Download receipt'}
+                      </button>
+                    )}                    <p className="mt-1 text-xs text-slate-500">
+                      Submitted: {dateLabel(payment.created_at)}
+                    </p>
+                  </div>
+                  {badge(payment.status)}
+                </div>
+
+                {payment.customer_note && (
+                  <p className="mt-3 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
+                    Customer note: {payment.customer_note}
+                  </p>
+                )}
+
+                {payment.admin_note && (
+                  <p className="mt-2 rounded-lg bg-blue-50 p-3 text-sm text-blue-800">
+                    Admin note: {payment.admin_note}
+                  </p>
+                )}
+
+                {isManager && payment.status === 'pending' && (
+                  <div className="mt-4 space-y-3 border-t border-slate-100 pt-4">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-slate-600">Review note (optional)</span>
+                      <textarea
+                        className={inputClass}
+                        rows={2}
+                        value={adminNote[payment.id] || ''}
+                        onChange={(event) => setAdminNote((notes) => ({ ...notes, [payment.id]: event.target.value }))}
+                        maxLength={2000}
+                      />
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={busy === `review-${payment.id}`}
+                        onClick={() => reviewPayment(payment, 'approved')}
+                        className="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                      >
+                        <CheckCircle2 size={16} /> Approve
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy === `review-${payment.id}`}
+                        onClick={() => reviewPayment(payment, 'rejected')}
+                        className="inline-flex items-center gap-2 rounded-xl bg-rose-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-800 disabled:opacity-50"
+                      >
+                        <XCircle size={16} /> Reject
+                      </button>
+                      {busy === `review-${payment.id}` && <LoaderCircle size={18} className="animate-spin self-center" />}
+                    </div>
+                  </div>
+                )}
+
+                {payment.status === 'pending' && !isManager && (
+                  <p className="mt-3 flex items-center gap-2 text-xs text-amber-700">
+                    <Clock size={14} /> Awaiting Admin/Authority verification.
+                  </p>
+                )}
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
